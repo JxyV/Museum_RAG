@@ -14,36 +14,36 @@ import numpy as np
 from dotenv import load_dotenv
 
 # STT 模型导入
-# try:
-#     import whisper
-#     WHISPER_AVAILABLE = True
-# except ImportError:
-#     WHISPER_AVAILABLE = False
+try:
+    import whisper
+    WHISPER_AVAILABLE = True
+except ImportError:
+    WHISPER_AVAILABLE = False
 
-# try:
-#     from speech_recognition import AudioData, Recognizer, Microphone
-#     SPEECH_RECOGNITION_AVAILABLE = True
-# except ImportError:
-#     SPEECH_RECOGNITION_AVAILABLE = False
+try:
+    from speech_recognition import AudioData, Recognizer, Microphone
+    SPEECH_RECOGNITION_AVAILABLE = True
+except ImportError:
+    SPEECH_RECOGNITION_AVAILABLE = False
 
 # TTS 模型导入
-# try:
-#     import edge_tts
-#     EDGE_TTS_AVAILABLE = True
-# except ImportError:
-#     EDGE_TTS_AVAILABLE = False
+try:
+    import edge_tts
+    EDGE_TTS_AVAILABLE = True
+except ImportError:
+    EDGE_TTS_AVAILABLE = False
 
-# try:
-#     from TTS.api import TTS
-#     COQUI_TTS_AVAILABLE = True
-# except ImportError:
-#     COQUI_TTS_AVAILABLE = False
+try:
+    from TTS.api import TTS
+    COQUI_TTS_AVAILABLE = True
+except ImportError:
+    COQUI_TTS_AVAILABLE = False
 
-# try:
-#     import pyttsx3
-#     PYTTSX3_AVAILABLE = True
-# except ImportError:
-#     PYTTSX3_AVAILABLE = False
+try:
+    import pyttsx3
+    PYTTSX3_AVAILABLE = True
+except ImportError:
+    PYTTSX3_AVAILABLE = False
 
 
 class STTModel(ABC):

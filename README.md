@@ -39,6 +39,12 @@ uvicorn server:app --reload
 # POST /ask { "question": "..." }
 ```
 
+8) Or use multimodal RAG (语音+文本)
+```bash
+python multimodal_rag.py
+# 支持语音输入和语音输出，完整的RAG流程
+```
+
 ---
 
 ## Overview
@@ -51,6 +57,9 @@ A minimal RAG starter using LangChain + Chroma. It reads local documents from `d
 - Vector DB: Chroma (persisted in `.chroma/`)
 - LLM: local Ollama (default) or OpenAI (via `OPENAI_API_KEY`)
 - Retrieval-augmented generation with top-k contexts and source citations
+- **Multimodal Support**: Voice input/output with STT/TTS models
+- **Multiple STT**: Whisper, SpeechRecognition
+- **Multiple TTS**: Edge TTS, Coqui TTS, Pyttsx3
 
 ### Models
 - Embeddings (choose via `.env`):
