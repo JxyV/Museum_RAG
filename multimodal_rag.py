@@ -9,8 +9,10 @@ from typing import List, Dict
 
 from dotenv import load_dotenv
 from rag_chain import build_chain
-from voice_interface import VoiceInterface
+from voice_interface import VoiceInterface, GummySTT, Qwen3TTSRealtime
 
+# 设置API Key
+os.environ["DASHSCOPE_API_KEY"] = "sk-8fae5f3d1cdd4e2dbabce5b6340a05c8"
 
 class MultimodalRAG:
     """多模态RAG系统"""
@@ -24,19 +26,32 @@ class MultimodalRAG:
         self.chain, self.retriever = build_chain()
         print("✅ RAG系统初始化完成！")
         
-        # 初始化语音系统
+        # 初始化语音系统 - 程序员可以在这里选择模型
         print("🔄 正在初始化语音系统...")
-        self.voice = VoiceInterface()
+        self.voice = self._create_voice_interface()
         print("✅ 语音系统初始化完成！")
         
         # 配置
         self.auto_tts = os.getenv("AUTO_TTS", "true").lower() == "true"
         self.record_duration = int(os.getenv("RECORD_DURATION", "5"))
         self.chat_history: List[str] = []
+        self.current_input_mode = "text"  # 跟踪当前输入方式
     
     def setup_logging(self):
         level = os.getenv("LOG_LEVEL", "INFO").upper()
         logging.basicConfig(level=level, format="%(asctime)s | %(levelname)s | %(message)s")
+    
+    def _create_voice_interface(self) -> VoiceInterface:
+        """创建语音接口 - 只使用GummySTT和qwen3-tts-flash-realtime"""
+        
+        # 使用GummySTT和qwen3-tts-flash-realtime组合
+        stt = GummySTT(api_key=os.getenv("DASHSCOPE_API_KEY"))
+        tts = Qwen3TTSRealtime(api_key=os.getenv("DASHSCOPE_API_KEY"))
+        
+        # 默认使用芊悦音色，程序员可以修改
+        voice = os.getenv("TTS_VOICE", "Cherry")
+        
+        return VoiceInterface(stt_model=stt, tts_model=tts, voice=voice)
     
     def get_user_input(self) -> str:
         """获取用户输入（支持文本和语音）"""
@@ -52,8 +67,13 @@ class MultimodalRAG:
             return ":q"
         elif choice == "v":
             print("🎤 请说话...")
-            return self.voice.voice_to_text(duration=self.record_duration)
+            self.current_input_mode = "voice"  # 标记为语音输入
+            recognized_text = self.voice.voice_to_text(duration=self.record_duration)
+            if recognized_text.strip():
+                print(f"🎯 识别结果: {recognized_text}")
+            return recognized_text
         else:  # 默认文本输入
+            self.current_input_mode = "text"  # 标记为文本输入
             return input("你：").strip()
     
     def rag_process(self, question: str) -> Dict:
@@ -136,10 +156,12 @@ class MultimodalRAG:
             for i, s in enumerate(sources, 1):
                 print(f"{i}. {s['source']} ({s['locator']})")
         
-        # 语音输出
-        if self.auto_tts and answer.strip():
+        # 根据输入方式决定是否播放语音
+        if self.current_input_mode == "voice" and answer.strip():
             print("\n🔊 正在播放回答...")
             self.voice.text_to_voice(answer)
+        elif self.current_input_mode == "text":
+            print("\n💬 文本回答完成")
     
     def process_question(self, question: str):
         """处理单个问题"""

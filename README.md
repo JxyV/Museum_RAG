@@ -68,6 +68,10 @@ A minimal RAG starter using LangChain + Chroma. It reads local documents from `d
 - LLM Backends:
   - Ollama: set `LLM_BACKEND=ollama` and `OLLAMA_MODEL` (e.g., `qwen2.5:7b`, `llama3.1:8b-instruct`)
   - OpenAI: set `LLM_BACKEND=openai` and `OPENAI_API_KEY`
+- STT Models:
+  - Whisper: `STT_BACKEND=whisper`, `STT_MODEL=base`
+  - SpeechRecognition: `STT_BACKEND=speech_recognition`, `STT_ENGINE=google`
+  - **阿里云Gummy**: `STT_BACKEND=gummy`, `DASHSCOPE_API_KEY=your-key`
 
 ### Ollama Notes
 - Install Ollama: see `https://ollama.ai/`
@@ -90,6 +94,7 @@ ollama pull bge-m3
 - TOP_K: default 4
 - DOCS_DIR: default `docs`
 - CHROMA_PERSIST_DIR: default `.chroma`
+- **CHROMA_COLLECTION_NAME**: default `rag_docs` (自定义数据库名称)
 
 ### Workflow
 1. `ingest.py` loads files, chunks, embeds, and writes to Chroma
@@ -103,6 +108,60 @@ ollama pull bge-m3
   - Modify `.env` only; code reads configuration dynamically.
 - PDF page numbers?
   - Citations include `filename` and `page` when available; otherwise the `chunk_id`.
+
+### 阿里云Gummy STT配置
+
+1. **获取API Key**：
+   - 访问[阿里云百炼平台](https://help.aliyun.com/zh/model-studio/sentence-python-sdk)
+   - 开通服务并获取API Key
+
+2. **配置环境变量**：
+```bash
+# 在 .env 文件中添加
+STT_BACKEND=gummy
+DASHSCOPE_API_KEY=your-dashscope-api-key-here
+STT_MODEL=gummy-chat-v1
+```
+
+3. **安装依赖**：
+```bash
+pip install dashscope>=1.14.0
+```
+
+4. **使用Gummy STT**：
+```bash
+python multimodal_rag.py
+# 选择语音输入，将使用阿里云Gummy进行识别
+```
+
+### 自定义Chroma数据库名称
+
+**问题**: Chroma数据库名称显示为乱码或默认名称  
+**解决**: 通过环境变量自定义数据库名称
+
+1. **在 `.env` 文件中设置**：
+```bash
+# 自定义数据库名称
+CHROMA_COLLECTION_NAME=my_knowledge_base
+CHROMA_PERSIST_DIR=.chroma
+```
+
+2. **重新构建向量库**：
+```bash
+python ingest.py
+```
+
+3. **验证数据库名称**：
+```bash
+# 查看 .chroma 目录下的文件
+ls -la .chroma/
+```
+
+**支持的名称格式**：
+- 英文: `my_knowledge_base`
+- 中文: `我的知识库` 
+- 数字: `knowledge_base_2024`
+- 下划线: `museum_docs`
 
 ### Development
 - Python 3.10+

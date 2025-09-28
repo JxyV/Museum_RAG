@@ -1,5 +1,5 @@
 """
-语音接口模块 - 支持多种STT和TTS模型
+语音接口模块 - 只支持GummySTT和qwen3-tts-flash
 """
 import os
 import io
@@ -13,37 +13,23 @@ import wave
 import numpy as np
 from dotenv import load_dotenv
 
-# STT 模型导入
+# 阿里云DashScope导入
 try:
-    import whisper
-    WHISPER_AVAILABLE = True
+    import dashscope
+    from dashscope.audio.asr import TranslationRecognizerChat, TranslationRecognizerCallback, TranscriptionResult, TranslationResult
+    DASHSCOPE_AVAILABLE = True
 except ImportError:
-    WHISPER_AVAILABLE = False
+    DASHSCOPE_AVAILABLE = False
 
+# WebSocket导入
 try:
-    from speech_recognition import AudioData, Recognizer, Microphone
-    SPEECH_RECOGNITION_AVAILABLE = True
+    import websocket
+    import json
+    import threading
+    import io
+    WEBSOCKET_AVAILABLE = True
 except ImportError:
-    SPEECH_RECOGNITION_AVAILABLE = False
-
-# TTS 模型导入
-try:
-    import edge_tts
-    EDGE_TTS_AVAILABLE = True
-except ImportError:
-    EDGE_TTS_AVAILABLE = False
-
-try:
-    from TTS.api import TTS
-    COQUI_TTS_AVAILABLE = True
-except ImportError:
-    COQUI_TTS_AVAILABLE = False
-
-try:
-    import pyttsx3
-    PYTTSX3_AVAILABLE = True
-except ImportError:
-    PYTTSX3_AVAILABLE = False
+    WEBSOCKET_AVAILABLE = False
 
 
 class STTModel(ABC):
@@ -54,57 +40,81 @@ class STTModel(ABC):
         pass
 
 
-class WhisperSTT(STTModel):
-    """Whisper STT模型"""
+class GummySTT(STTModel):
+    """阿里云Gummy一句话识别STT"""
     
-    def __init__(self, model_size: str = "base"):
-        if not WHISPER_AVAILABLE:
-            raise ImportError("whisper not installed. Run: pip install openai-whisper")
+    def __init__(self, api_key: str = None, model: str = "gummy-chat-v1"):
+        if not DASHSCOPE_AVAILABLE:
+            raise ImportError("dashscope not installed. Run: pip install dashscope")
         
-        self.model = whisper.load_model(model_size)
-        logging.info(f"Whisper model {model_size} loaded")
-    
-    def transcribe(self, audio_data: bytes) -> str:
-        # 将音频数据保存为临时文件
-        temp_file = "temp_audio.wav"
-        with open(temp_file, "wb") as f:
-            f.write(audio_data)
+        # 设置API Key
+        if api_key:
+            dashscope.api_key = api_key
+        elif os.getenv("DASHSCOPE_API_KEY"):
+            dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
+        else:
+            raise ValueError("DASHSCOPE_API_KEY not found. Please set it in environment or pass api_key parameter")
         
-        try:
-            result = self.model.transcribe(temp_file, language="zh")
-            return result["text"].strip()
-        finally:
-            # 清理临时文件
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
-
-
-class SpeechRecognitionSTT(STTModel):
-    """使用speech_recognition库的STT"""
-    
-    def __init__(self, engine: str = "google"):
-        if not SPEECH_RECOGNITION_AVAILABLE:
-            raise ImportError("speech_recognition not installed. Run: pip install SpeechRecognition")
-        
-        self.recognizer = Recognizer()
-        self.engine = engine
-        logging.info(f"SpeechRecognition STT initialized with {engine}")
+        self.model = model
+        self.recognized_text = ""
+        self.recognition_complete = False
+        logging.info(f"Gummy STT initialized with model: {model}")
     
     def transcribe(self, audio_data: bytes) -> str:
-        # 将bytes转换为AudioData对象
-        audio = AudioData(audio_data, 16000, 2)  # 假设16kHz, 16bit
+        """使用Gummy进行语音识别"""
+        self.recognized_text = ""
+        self.recognition_complete = False
         
-        try:
-            if self.engine == "google":
-                text = self.recognizer.recognize_google(audio, language="zh-CN")
-            elif self.engine == "sphinx":
-                text = self.recognizer.recognize_sphinx(audio)
-            else:
-                text = self.recognizer.recognize_google(audio, language="zh-CN")
+        # 创建回调类
+        class GummyCallback(TranslationRecognizerCallback):
+            def __init__(self, parent):
+                self.parent = parent
             
-            return text.strip()
+            def on_open(self) -> None:
+                logging.info("Gummy STT connection opened")
+            
+            def on_close(self) -> None:
+                logging.info("Gummy STT connection closed")
+            
+            def on_event(self, request_id, transcription_result: TranscriptionResult, 
+                        translation_result: TranslationResult, usage) -> None:
+                if transcription_result is not None:
+                    self.parent.recognized_text = transcription_result.text
+                    if transcription_result.is_sentence_end:
+                        self.parent.recognition_complete = True
+                        logging.info(f"Gummy STT recognition complete: {self.parent.recognized_text}")
+        
+        # 创建识别器
+        callback = GummyCallback(self)
+        recognizer = TranslationRecognizerChat(
+            model=self.model,
+            format="pcm",
+            sample_rate=16000,
+            transcription_enabled=True,
+            translation_enabled=False,  # 只做识别，不做翻译
+            callback=callback,
+        )
+        
+        try:
+            # 启动识别
+            recognizer.start()
+            
+            # 分块发送音频数据
+            chunk_size = 3200  # 约100ms的音频数据
+            for i in range(0, len(audio_data), chunk_size):
+                chunk = audio_data[i:i + chunk_size]
+                if not recognizer.send_audio_frame(chunk):
+                    break
+                if self.recognition_complete:
+                    break
+            
+            # 停止识别
+            recognizer.stop()
+            
+            return self.recognized_text.strip()
+            
         except Exception as e:
-            logging.error(f"STT recognition failed: {e}")
+            logging.error(f"Gummy STT recognition failed: {e}")
             return ""
 
 
@@ -116,96 +126,134 @@ class TTSModel(ABC):
         pass
 
 
-class EdgeTTS(TTSModel):
-    """Edge TTS模型"""
+class Qwen3TTSRealtime(TTSModel):
+    """Qwen3 TTS Realtime模型 - 使用WebSocket连接"""
     
-    def __init__(self, voice: str = "zh-CN-XiaoxiaoNeural"):
-        if not EDGE_TTS_AVAILABLE:
-            raise ImportError("edge-tts not installed. Run: pip install edge-tts")
+    def __init__(self, api_key: str = None, model: str = "qwen3-tts-flash-realtime"):
+        if not WEBSOCKET_AVAILABLE:
+            raise ImportError("websocket-client not installed. Run: pip install websocket-client")
         
-        self.voice = voice
-        logging.info(f"Edge TTS initialized with voice: {voice}")
+        # 设置API Key
+        if api_key:
+            self.api_key = api_key
+        elif os.getenv("DASHSCOPE_API_KEY"):
+            self.api_key = os.getenv("DASHSCOPE_API_KEY")
+        else:
+            raise ValueError("DASHSCOPE_API_KEY not found. Please set it in environment or pass api_key parameter")
+        
+        self.model = model
+        self.api_url = f"wss://dashscope.aliyuncs.com/api-ws/v1/realtime?model={model}"
+        self.audio_data = b""
+        self.synthesis_complete = False
+        logging.info(f"Qwen3 TTS Realtime initialized with model: {model}")
     
-    def synthesize(self, text: str) -> bytes:
-        import asyncio
-        
-        async def _synthesize():
-            communicate = edge_tts.Communicate(text, self.voice)
-            return await communicate.as_bytes()
-        
-        return asyncio.run(_synthesize())
-
-
-class CoquiTTS(TTSModel):
-    """Coqui TTS模型"""
-    
-    def __init__(self, model_name: str = "tts_models/zh-CN/baker/tacotron2-DDC-GST"):
-        if not COQUI_TTS_AVAILABLE:
-            raise ImportError("TTS not installed. Run: pip install TTS")
-        
-        self.tts = TTS(model_name)
-        logging.info(f"Coqui TTS initialized with model: {model_name}")
-    
-    def synthesize(self, text: str) -> bytes:
-        # 生成音频文件
-        temp_file = "temp_output.wav"
-        self.tts.tts_to_file(text=text, file_path=temp_file)
-        
+    def synthesize(self, text: str, voice: str = "Cherry") -> bytes:
+        """使用Qwen3 TTS Realtime进行语音合成"""
         try:
-            with open(temp_file, "rb") as f:
-                audio_data = f.read()
-            return audio_data
-        finally:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
-
-
-class Pyttsx3TTS(TTSModel):
-    """Pyttsx3 TTS模型（系统内置）"""
-    
-    def __init__(self, rate: int = 200, volume: float = 0.9):
-        if not PYTTSX3_AVAILABLE:
-            raise ImportError("pyttsx3 not installed. Run: pip install pyttsx3")
-        
-        self.engine = pyttsx3.init()
-        self.engine.setProperty('rate', rate)
-        self.engine.setProperty('volume', volume)
-        
-        # 设置中文语音
-        voices = self.engine.getProperty('voices')
-        for voice in voices:
-            if 'chinese' in voice.name.lower() or 'zh' in voice.id.lower():
-                self.engine.setProperty('voice', voice.id)
-                break
-        
-        logging.info("Pyttsx3 TTS initialized")
-    
-    def synthesize(self, text: str) -> bytes:
-        # Pyttsx3 不直接返回音频数据，需要特殊处理
-        # 这里简化处理，实际使用时可能需要保存到文件
-        temp_file = "temp_pyttsx3.wav"
-        self.engine.save_to_file(text, temp_file)
-        self.engine.runAndWait()
-        
-        try:
-            with open(temp_file, "rb") as f:
-                audio_data = f.read()
-            return audio_data
-        finally:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
+            self.audio_data = b""
+            self.synthesis_complete = False
+            
+            # 创建WebSocket连接
+            headers = [f"Authorization: Bearer {self.api_key}"]
+            
+            def on_open(ws):
+                logging.info(f"Connected to TTS server: {self.api_url}")
+                # 发送配置消息
+                config_message = {
+                    "type": "config",
+                    "voice": voice,
+                    "format": "wav",
+                    "sample_rate": 16000
+                }
+                ws.send(json.dumps(config_message))
+                
+                # 发送文本消息
+                text_message = {
+                    "type": "text",
+                    "text": text
+                }
+                ws.send(json.dumps(text_message))
+                
+                # 发送结束消息
+                end_message = {
+                    "type": "end"
+                }
+                ws.send(json.dumps(end_message))
+            
+            def on_message(ws, message):
+                try:
+                    data = json.loads(message)
+                    logging.debug(f"Received message: {data}")
+                    
+                    if data.get("type") == "audio":
+                        # 解码base64音频数据
+                        import base64
+                        audio_chunk = base64.b64decode(data["audio"])
+                        self.audio_data += audio_chunk
+                        logging.debug(f"Received audio chunk: {len(audio_chunk)} bytes")
+                    
+                    elif data.get("type") == "done":
+                        self.synthesis_complete = True
+                        logging.info("TTS synthesis completed")
+                        ws.close()
+                        
+                except Exception as e:
+                    logging.error(f"Error processing TTS message: {e}")
+            
+            def on_error(ws, error):
+                logging.error(f"TTS WebSocket error: {error}")
+                self.synthesis_complete = True
+            
+            def on_close(ws, close_status_code, close_msg):
+                logging.info("TTS WebSocket connection closed")
+                self.synthesis_complete = True
+            
+            # 创建WebSocket连接
+            ws = websocket.WebSocketApp(
+                self.api_url,
+                header=headers,
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close
+            )
+            
+            # 在新线程中运行WebSocket
+            def run_websocket():
+                ws.run_forever()
+            
+            thread = threading.Thread(target=run_websocket)
+            thread.daemon = True
+            thread.start()
+            
+            # 等待合成完成
+            timeout = 30  # 30秒超时
+            start_time = time.time()
+            while not self.synthesis_complete and (time.time() - start_time) < timeout:
+                time.sleep(0.1)
+            
+            if not self.synthesis_complete:
+                logging.warning("TTS synthesis timeout")
+                return b""
+            
+            return self.audio_data
+                
+        except Exception as e:
+            logging.error(f"Qwen3 TTS Realtime synthesis failed: {e}")
+            return b""
 
 
 class VoiceInterface:
-    """语音接口主类"""
+    """语音接口主类 - 只支持GummySTT和qwen3-tts-realtime"""
     
-    def __init__(self):
+    def __init__(self, stt_model: STTModel = None, tts_model: TTSModel = None, voice: str = "Cherry"):
         load_dotenv()
         self.setup_logging()
         
-        # 初始化STT和TTS
-        self.stt = self._create_stt()
-        self.tts = self._create_tts()
+        # 初始化STT和TTS - 程序员可以传入自定义模型
+        self.stt = stt_model or self._create_stt()
+        self.tts = tts_model or self._create_tts()
+        self.voice = voice  # TTS音色
         
         # 音频参数
         self.chunk = 1024
@@ -221,32 +269,16 @@ class VoiceInterface:
         logging.basicConfig(level=level, format="%(asctime)s | %(levelname)s | %(message)s")
     
     def _create_stt(self) -> STTModel:
-        stt_backend = os.getenv("STT_BACKEND", "whisper").lower()
-        stt_model = os.getenv("STT_MODEL", "base")
-        
-        if stt_backend == "whisper":
-            return WhisperSTT(model_size=stt_model)
-        elif stt_backend == "speech_recognition":
-            engine = os.getenv("STT_ENGINE", "google")
-            return SpeechRecognitionSTT(engine=engine)
-        else:
-            raise ValueError(f"Unsupported STT backend: {stt_backend}")
+        """创建STT模型 - 默认使用GummySTT"""
+        api_key = os.getenv("DASHSCOPE_API_KEY")
+        model = os.getenv("STT_MODEL", "gummy-chat-v1")
+        return GummySTT(api_key=api_key, model=model)
     
     def _create_tts(self) -> TTSModel:
-        tts_backend = os.getenv("TTS_BACKEND", "edge").lower()
-        
-        if tts_backend == "edge":
-            voice = os.getenv("TTS_VOICE", "zh-CN-XiaoxiaoNeural")
-            return EdgeTTS(voice=voice)
-        elif tts_backend == "coqui":
-            model = os.getenv("TTS_MODEL", "tts_models/zh-CN/baker/tacotron2-DDC-GST")
-            return CoquiTTS(model_name=model)
-        elif tts_backend == "pyttsx3":
-            rate = int(os.getenv("TTS_RATE", "200"))
-            volume = float(os.getenv("TTS_VOLUME", "0.9"))
-            return Pyttsx3TTS(rate=rate, volume=volume)
-        else:
-            raise ValueError(f"Unsupported TTS backend: {tts_backend}")
+        """创建TTS模型 - 默认使用qwen3-tts-flash-realtime"""
+        api_key = os.getenv("DASHSCOPE_API_KEY")
+        model = os.getenv("TTS_MODEL", "qwen3-tts-flash-realtime")
+        return Qwen3TTSRealtime(api_key=api_key, model=model)
     
     def record_audio(self, duration: Optional[int] = None) -> bytes:
         """录制音频"""
@@ -298,7 +330,7 @@ class VoiceInterface:
         print("🔄 正在合成语音...")
         start_time = time.perf_counter()
         
-        audio_data = self.tts.synthesize(text)
+        audio_data = self.tts.synthesize(text, voice=self.voice)
         
         end_time = time.perf_counter()
         print(f"✅ 合成完成 ({end_time - start_time:.1f}秒)")
@@ -309,24 +341,73 @@ class VoiceInterface:
         """播放音频"""
         print("🔊 正在播放...")
         
-        stream = self.audio.open(
-            format=self.format,
-            channels=self.channels,
-            rate=self.rate,
-            output=True
-        )
-        
-        # 从WAV数据中提取音频帧
-        wav_buffer = io.BytesIO(audio_data)
-        with wave.open(wav_buffer, 'rb') as wf:
-            data = wf.readframes(1024)
-            while data:
-                stream.write(data)
+        try:
+            # 从WAV数据中提取音频参数
+            wav_buffer = io.BytesIO(audio_data)
+            with wave.open(wav_buffer, 'rb') as wf:
+                # 获取WAV文件的真实参数
+                channels = wf.getnchannels()
+                sample_width = wf.getsampwidth()
+                framerate = wf.getframerate()
+                n_frames = wf.getnframes()
+                
+                # 设置PyAudio格式
+                if sample_width == 1:
+                    format = pyaudio.paUInt8
+                elif sample_width == 2:
+                    format = pyaudio.paInt16
+                elif sample_width == 4:
+                    format = pyaudio.paInt32
+                else:
+                    format = pyaudio.paInt16
+                
+                # 打开音频流
+                stream = self.audio.open(
+                    format=format,
+                    channels=channels,
+                    rate=framerate,
+                    output=True
+                )
+                
+                # 播放音频数据
                 data = wf.readframes(1024)
-        
-        stream.stop_stream()
-        stream.close()
-        print("✅ 播放完成")
+                while data:
+                    stream.write(data)
+                    data = wf.readframes(1024)
+                
+                stream.stop_stream()
+                stream.close()
+                print("✅ 播放完成")
+                
+        except Exception as e:
+            logging.error(f"Audio playback failed: {e}")
+            print(f"❌ 播放失败: {e}")
+            # 尝试使用系统播放器作为备选方案
+            self._fallback_play_audio(audio_data)
+    
+    def _fallback_play_audio(self, audio_data: bytes):
+        """备选音频播放方案"""
+        try:
+            import tempfile
+            import subprocess
+            
+            # 保存音频到临时文件
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                temp_file.write(audio_data)
+                temp_file_path = temp_file.name
+            
+            # 使用系统播放器播放
+            print("🔄 使用系统播放器播放...")
+            subprocess.run(["aplay", temp_file_path], check=True)
+            
+            # 清理临时文件
+            os.unlink(temp_file_path)
+            print("✅ 播放完成")
+            
+        except Exception as e:
+            logging.error(f"Fallback audio playback failed: {e}")
+            print(f"❌ 备选播放也失败了: {e}")
+            print("💡 建议：请检查音频设备或安装aplay: sudo apt-get install alsa-utils")
     
     def voice_to_text(self, duration: Optional[int] = None) -> str:
         """完整的语音转文本流程"""
@@ -337,6 +418,33 @@ class VoiceInterface:
         """完整的文本转语音流程"""
         audio_data = self.synthesize_speech(text)
         self.play_audio(audio_data)
+    
+    def set_voice(self, voice: str):
+        """设置TTS音色"""
+        self.voice = voice
+        logging.info(f"TTS voice changed to: {voice}")
+    
+    def get_available_voices(self) -> dict:
+        """获取可用的音色列表"""
+        return {
+            "芊悦 (Cherry)": "Cherry",
+            "晨煦 (Ethan)": "Ethan", 
+            "不吃鱼 (Nofish)": "Nofish",
+            "詹妮弗 (Jennifer)": "Jennifer",
+            "甜茶 (Ryan)": "Ryan",
+            "卡捷琳娜 (Katerina)": "Katerina",
+            "墨讲师 (Elias)": "Elias",
+            "上海-阿珍 (Jada)": "Jada",
+            "北京-晓东 (Dylan)": "Dylan",
+            "四川-晴儿 (Sunny)": "Sunny",
+            "南京-老李 (li)": "li",
+            "陕西-秦川 (Marcus)": "Marcus",
+            "闽南-阿杰 (Roy)": "Roy",
+            "天津-李彼得 (Peter)": "Peter",
+            "粤语-阿强 (Rocky)": "Rocky",
+            "粤语-阿清 (Kiki)": "Kiki",
+            "四川-程川 (Eric)": "Eric"
+        }
     
     def cleanup(self):
         """清理资源"""

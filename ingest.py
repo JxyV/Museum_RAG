@@ -82,12 +82,16 @@ def main() -> None:
     load_dotenv()
     setup_logging()
 
-    docs_dir = Path(os.getenv("DOCS_DIR", "docs"))
-    persist_dir = os.getenv("CHROMA_PERSIST_DIR", ".chroma")
-    chunk_size = getenv_int("CHUNK_SIZE", 800)
-    chunk_overlap = getenv_int("CHUNK_OVERLAP", 120)
+    # 使用配置类
+    from config import get_rag_config
+    config = get_rag_config()
+    
+    docs_dir = Path(config.get_docs_dir())
+    chunk_config = config.get_chunk_config()
+    chunk_size = chunk_config["chunk_size"]
+    chunk_overlap = chunk_config["chunk_overlap"]
 
-    logging.info("Docs dir: %s | Persist dir: %s", docs_dir, persist_dir)
+    logging.info("Docs dir: %s | Store dir: %s", docs_dir, config.get_store_dir())
     raw_docs = load_all_documents(docs_dir)
     if not raw_docs:
         logging.warning("No documents loaded. Put files into %s", docs_dir)
@@ -108,11 +112,15 @@ def main() -> None:
 
     embeddings = build_embeddings()
 
+    # 使用配置类
+    from config import get_rag_config
+    config = get_rag_config()
+    
     # Create / update Chroma collection
     vectordb = Chroma(
-        collection_name="rag_docs",
+        collection_name=config.get_collection_name(),
         embedding_function=embeddings,
-        persist_directory=persist_dir,
+        persist_directory=config.get_store_dir(),
     )
 
     # Clear and re-ingest for simplicity
@@ -121,9 +129,9 @@ def main() -> None:
         vectordb.delete_collection()  # type: ignore[attr-defined]
         logging.info("Recreated Chroma collection.")
         vectordb = Chroma(
-            collection_name="rag_docs",
+            collection_name=config.get_collection_name(),
             embedding_function=embeddings,
-            persist_directory=persist_dir,
+            persist_directory=config.get_store_dir(),
         )
     except Exception:
         # Fallback: if delete_collection not available

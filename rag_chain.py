@@ -44,14 +44,17 @@ def build_llm():
 
 
 def load_retriever():
+    from config import get_rag_config
+    
     embeddings = build_embeddings()
-    persist_dir = os.getenv("CHROMA_PERSIST_DIR", ".chroma")
+    config = get_rag_config()
+    
     vectordb = Chroma(
-        collection_name="rag_docs",
+        collection_name=config.get_collection_name(),
         embedding_function=embeddings,
-        persist_directory=persist_dir,
+        persist_directory=config.get_store_dir(),
     )
-    k = int(os.getenv("TOP_K", "4"))
+    k = config.get_retrieval_config()["top_k"]
     return vectordb.as_retriever(search_kwargs={"k": k})
 
 
