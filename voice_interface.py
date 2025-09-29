@@ -147,27 +147,30 @@ class Qwen3TTSRealtime(TTSModel):
         self.synthesis_complete = False
         logging.info(f"Qwen3 TTS Realtime initialized with model: {model}")
     
-    def synthesize(self, text: str, voice: str = "Cherry") -> bytes:
-        """使用Qwen3 TTS Realtime进行语音合成"""
+    def synthesize_streaming(self, text: str, voice: str = "Cherry", callback=None) -> dict:
+        """使用Qwen3 TTS Realtime进行流式语音合成"""
         try:
             self.audio_data = b""
             self.synthesis_complete = False
+            self.first_audio_time = None
+            self.synthesis_start_time = time.perf_counter()
             
             # 创建WebSocket连接
             headers = [f"Authorization: Bearer {self.api_key}"]
             
             def on_open(ws):
                 logging.info(f"Connected to TTS server: {self.api_url}")
-                # 发送配置消息
+                # 发送配置消息 - 根据官方文档格式
                 config_message = {
                     "type": "config",
                     "voice": voice,
                     "format": "wav",
-                    "sample_rate": 16000
+                    "sample_rate": 16000,
+                    "enable_timestamp": False
                 }
                 ws.send(json.dumps(config_message))
                 
-                # 发送文本消息
+                # 发送文本消息 - 支持流式输入
                 text_message = {
                     "type": "text",
                     "text": text
@@ -185,17 +188,40 @@ class Qwen3TTSRealtime(TTSModel):
                     data = json.loads(message)
                     logging.debug(f"Received message: {data}")
                     
+                    # 根据官方文档处理不同类型的消息
                     if data.get("type") == "audio":
+                        # 记录首音频时间
+                        if self.first_audio_time is None:
+                            self.first_audio_time = time.perf_counter()
+                            first_audio_latency = (self.first_audio_time - self.synthesis_start_time) * 1000.0
+                            print(f"⚡ 语音首token延迟: {first_audio_latency:.1f}ms")
+                        
                         # 解码base64音频数据
                         import base64
                         audio_chunk = base64.b64decode(data["audio"])
                         self.audio_data += audio_chunk
+                        
+                        # 流式播放音频
+                        if callback:
+                            callback(audio_chunk)
+                        
                         logging.debug(f"Received audio chunk: {len(audio_chunk)} bytes")
                     
+                    elif data.get("type") == "audio.done":
+                        # 音频生成完成
+                        logging.info("Audio generation completed")
+                    
                     elif data.get("type") == "done":
+                        # 响应完成
                         self.synthesis_complete = True
                         logging.info("TTS synthesis completed")
                         ws.close()
+                    
+                    elif data.get("type") == "error":
+                        # 错误处理
+                        error_msg = data.get("message", "Unknown error")
+                        logging.error(f"TTS error: {error_msg}")
+                        self.synthesis_complete = True
                         
                 except Exception as e:
                     logging.error(f"Error processing TTS message: {e}")
@@ -234,13 +260,33 @@ class Qwen3TTSRealtime(TTSModel):
             
             if not self.synthesis_complete:
                 logging.warning("TTS synthesis timeout")
-                return b""
+                return {"audio_data": b"", "performance": {}}
             
-            return self.audio_data
+            # 计算性能统计
+            synthesis_end_time = time.perf_counter()
+            first_audio_latency = (self.first_audio_time - self.synthesis_start_time) * 1000.0 if self.first_audio_time else 0
+            total_synthesis_time = (synthesis_end_time - self.synthesis_start_time) * 1000.0
+            chinese_count = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+            
+            performance = {
+                "first_audio_ms": first_audio_latency,
+                "total_synthesis_ms": total_synthesis_time,
+                "chinese_count": chinese_count
+            }
+            
+            return {
+                "audio_data": self.audio_data,
+                "performance": performance
+            }
                 
         except Exception as e:
             logging.error(f"Qwen3 TTS Realtime synthesis failed: {e}")
-            return b""
+            return {"audio_data": b"", "performance": {}}
+    
+    def synthesize(self, text: str, voice: str = "Cherry") -> bytes:
+        """使用Qwen3 TTS Realtime进行语音合成（兼容性方法）"""
+        result = self.synthesize_streaming(text, voice)
+        return result["audio_data"]
 
 
 class VoiceInterface:
@@ -337,53 +383,32 @@ class VoiceInterface:
         
         return audio_data
     
+    def play_audio_streaming(self, audio_chunk: bytes):
+        """流式播放音频片段"""
+        try:
+            import tempfile
+            import subprocess
+            
+            # 保存音频片段到临时文件
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                temp_file.write(audio_chunk)
+                temp_file_path = temp_file.name
+            
+            # 使用系统播放器播放
+            subprocess.run(["aplay", temp_file_path], check=True, capture_output=True)
+            
+            # 清理临时文件
+            os.unlink(temp_file_path)
+            
+        except Exception as e:
+            logging.debug(f"Streaming audio playback failed: {e}")
+    
     def play_audio(self, audio_data: bytes):
         """播放音频"""
         print("🔊 正在播放...")
         
-        try:
-            # 从WAV数据中提取音频参数
-            wav_buffer = io.BytesIO(audio_data)
-            with wave.open(wav_buffer, 'rb') as wf:
-                # 获取WAV文件的真实参数
-                channels = wf.getnchannels()
-                sample_width = wf.getsampwidth()
-                framerate = wf.getframerate()
-                n_frames = wf.getnframes()
-                
-                # 设置PyAudio格式
-                if sample_width == 1:
-                    format = pyaudio.paUInt8
-                elif sample_width == 2:
-                    format = pyaudio.paInt16
-                elif sample_width == 4:
-                    format = pyaudio.paInt32
-                else:
-                    format = pyaudio.paInt16
-                
-                # 打开音频流
-                stream = self.audio.open(
-                    format=format,
-                    channels=channels,
-                    rate=framerate,
-                    output=True
-                )
-                
-                # 播放音频数据
-                data = wf.readframes(1024)
-                while data:
-                    stream.write(data)
-                    data = wf.readframes(1024)
-                
-                stream.stop_stream()
-                stream.close()
-                print("✅ 播放完成")
-                
-        except Exception as e:
-            logging.error(f"Audio playback failed: {e}")
-            print(f"❌ 播放失败: {e}")
-            # 尝试使用系统播放器作为备选方案
-            self._fallback_play_audio(audio_data)
+        # 直接使用系统播放器，避免PyAudio的采样率问题
+        self._fallback_play_audio(audio_data)
     
     def _fallback_play_audio(self, audio_data: bytes):
         """备选音频播放方案"""
@@ -414,6 +439,15 @@ class VoiceInterface:
         audio_data = self.record_audio(duration)
         return self.transcribe_audio(audio_data)
     
+    def text_to_voice_streaming(self, text: str) -> dict:
+        """完整的流式文本转语音流程"""
+        print("🔄 正在流式合成语音...")
+        
+        # 使用流式合成
+        result = self.tts.synthesize_streaming(text, voice=self.voice, callback=self.play_audio_streaming)
+        
+        return result
+    
     def text_to_voice(self, text: str):
         """完整的文本转语音流程"""
         audio_data = self.synthesize_speech(text)
@@ -425,7 +459,7 @@ class VoiceInterface:
         logging.info(f"TTS voice changed to: {voice}")
     
     def get_available_voices(self) -> dict:
-        """获取可用的音色列表"""
+        """获取可用的音色列表 - 根据官方文档"""
         return {
             "芊悦 (Cherry)": "Cherry",
             "晨煦 (Ethan)": "Ethan", 
@@ -437,7 +471,7 @@ class VoiceInterface:
             "上海-阿珍 (Jada)": "Jada",
             "北京-晓东 (Dylan)": "Dylan",
             "四川-晴儿 (Sunny)": "Sunny",
-            "南京-老李 (li)": "li",
+            "南京-老李 (Li)": "Li",  # 修正为官方文档中的Li
             "陕西-秦川 (Marcus)": "Marcus",
             "闽南-阿杰 (Roy)": "Roy",
             "天津-李彼得 (Peter)": "Peter",

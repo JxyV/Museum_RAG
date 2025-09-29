@@ -101,13 +101,30 @@ class MultimodalRAG:
         print(f"✅ 检索到 {len(docs)} 个相关文档片段")
         print("🔄 正在生成回答...")
         
-        # 第二步：LLM生成回答
+        # 第二步：LLM流式生成回答
         t_generation_start = time.perf_counter()
-        answer = self.chain.invoke({
+        first_token_time = None
+        answer = ""
+        
+        print("🤖 AI回答: ", end="", flush=True)
+        
+        # 使用流式输出
+        for chunk in self.chain.stream({
             "question": question, 
             "chat_history": "\n".join(self.chat_history)
-        })
+        }):
+            if first_token_time is None:
+                first_token_time = time.perf_counter()
+                first_token_latency = (first_token_time - t_generation_start) * 1000.0
+                print(f"\n⚡ 首token延迟: {first_token_latency:.1f}ms")
+                print("🤖 AI回答: ", end="", flush=True)
+            
+            # 打印流式内容
+            print(chunk, end="", flush=True)
+            answer += chunk
+        
         t_generation_end = time.perf_counter()
+        print()  # 换行
         
         # 统计中文字符
         chinese_count = sum(1 for ch in answer if "\u4e00" <= ch <= "\u9fff")
@@ -122,8 +139,10 @@ class MultimodalRAG:
             sources.append({"source": source, "locator": locator})
         
         # 性能统计
+        first_token_latency = (first_token_time - t_generation_start) * 1000.0 if first_token_time else 0
         performance = {
             "retrieval_ms": (t_retrieval_end - t_retrieval_start) * 1000.0,
+            "first_token_ms": first_token_latency,
             "generation_ms": (t_generation_end - t_generation_start) * 1000.0,
             "total_ms": (t_retrieval_end - t_retrieval_start + t_generation_end - t_generation_start) * 1000.0,
             "chinese_count": chinese_count
@@ -141,11 +160,12 @@ class MultimodalRAG:
         sources = result["sources"]
         perf = result["performance"]
         
-        print(f"\n🤖 助手：{answer}")
+        # 流式输出已经在生成过程中显示，这里不需要重复显示
         
         # 性能统计
         print("\n--- 性能统计 ---")
         print(f"检索耗时：{perf['retrieval_ms']:.1f} ms")
+        print(f"首token延迟：{perf['first_token_ms']:.1f} ms")
         print(f"生成耗时：{perf['generation_ms']:.1f} ms")
         print(f"总耗时：{perf['total_ms']:.1f} ms")
         print(f"中文字符数：{perf['chinese_count']}")
@@ -158,8 +178,16 @@ class MultimodalRAG:
         
         # 根据输入方式决定是否播放语音
         if self.current_input_mode == "voice" and answer.strip():
-            print("\n🔊 正在播放回答...")
-            self.voice.text_to_voice(answer)
+            print("\n🔊 正在流式播放回答...")
+            tts_result = self.voice.text_to_voice_streaming(answer)
+            
+            # 显示语音性能统计
+            if tts_result and "performance" in tts_result:
+                tts_perf = tts_result["performance"]
+                print("\n--- 语音性能统计 ---")
+                print(f"语音首token延迟：{tts_perf.get('first_audio_ms', 0):.1f} ms")
+                print(f"语音总消耗时间：{tts_perf.get('total_synthesis_ms', 0):.1f} ms")
+                print(f"语音中文字符数：{tts_perf.get('chinese_count', 0)}")
         elif self.current_input_mode == "text":
             print("\n💬 文本回答完成")
     
